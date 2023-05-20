@@ -34,6 +34,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = _add_logging_args(parser)
     parser = _add_inference_args(parser)
     parser = _add_transformer_engine_args(parser)
+    parser = _add_moe_args(parser)
     parser = _add_retro_args(parser)
 
     # Custom arguments.
@@ -49,7 +50,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     # Args from environment
     args.rank = int(os.getenv('RANK', '0'))
     args.world_size = int(os.getenv("WORLD_SIZE", '1'))
-        
+
     return args
 
 def validate_args(args, defaults={}):
@@ -359,6 +360,11 @@ def validate_args(args, defaults={}):
     if not args.add_bias_linear:
         args.bias_gelu_fusion = False
 
+    # Pipeline parallelism not supported with MoE.
+    if args.moe_num_experts is not None:
+        assert args.pipeline_model_parallel_size == 1, (
+            "Pipeline parallelism not yet support for MoEs.")
+
     # Load retro args.
     if args.retro_workdir:
         retro_args_path = get_retro_args_path(args.retro_workdir)
@@ -553,10 +559,33 @@ def _add_network_size_args(parser):
     group.add_argument('--bert-no-binary-head', action='store_false',
                        help='Disable BERT binary head.',
                        dest='bert_binary_head')
-    group.add_argument('--num-experts', type=int, default=None,
-                       help='Number of Experts in Switch Transformer (None means no Switch)')
     group.add_argument('--untie-embeddings-and-output-weights', action='store_true',
-                       help='Untie embeddings and output weights.'),
+                       help='Untie embeddings and output weights.'),                       
+    return parser
+
+
+def _add_moe_args(parser):
+    group = parser.add_argument_group(title='moe')
+    group.add_argument('--moe-num-experts', type=int, default=None,
+                       help='The number of experts in MoE layers. MoE '
+                       'layers not used if set to None')
+    group.add_argument('--moe-capacity-factor', type=int, default=0,
+                       help='Capacity factor for MoE layers. If zero, use '
+                       'dropless MoE implementation.')
+    group.add_argument('--moe-top-k', type=int, default=1,
+                       help='The number of experts each token is routed to '
+                       'in MoE layers.')
+    group.add_argument('--moe-loss-weight', type=float, default=0.1,
+                       help='The weight for the MoE auxiliary load balancing '
+                       'loss.')
+    group.add_argument('--moe-lbl-in-fp32', type=bool, default=False,
+                       help='Whether to compute the load balancing loss in '
+                       'fp32.')
+    group.add_argument('--moe-jitter-eps', type=float, default=None,
+                       help='Coefficient for MoE routing jitter. Jitter is '
+                       'not used if set to None.')
+    group.add_argument('--moe-use-megatron-switch', type=bool, default=False,
+                       help='Whether to use Megatron SwitchMLP for MoE layers.')
     return parser
 
 
@@ -982,7 +1011,6 @@ def _add_distributed_args(parser):
                        'affects the encoder embedding.)')
     group.add_argument('--use-distributed-optimizer', action='store_true',
                        help='Use distributed optimizer.')
-
     return parser
 
 
@@ -1191,14 +1219,14 @@ def _add_vision_args(parser):
     group.add_argument('--swin-backbone-type', type=str, default='tiny',
                        choices=['tiny', 'base', 'h3'],
                        help='pretraining objectives')
-    
+
     # inpainting arguments
     group.add_argument('--mask-type', type=str, default='random',
                        choices=['random', 'row'],
                        help='mask types')
     group.add_argument('--mask-factor', type=float, default=1.0,
                        help='mask size scaling parameter')
- 
+
     # dino arguments
     group.add_argument('--iter-per-epoch', type=int, default=1250,
                        help='iterations per epoch')
