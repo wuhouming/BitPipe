@@ -5,7 +5,11 @@ import torch
 import transformer_engine as te
 from pkg_resources import packaging
 
-from megatron.core.parallel_state import get_tensor_model_parallel_group
+from megatron.core.parallel_state import (
+    get_context_parallel_global_ranks,
+    get_context_parallel_group,
+    get_tensor_model_parallel_group,
+)
 from megatron.core.tensor_parallel import get_cuda_rng_tracker
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -38,7 +42,7 @@ class TENorm:
         hidden_size: int,
         eps: float = 1e-5,
         sequence_parallel: bool = False,
-        normalization="LayerNorm",
+        normalization: str = "LayerNorm",
         **kwargs
     ):
         if normalization == "LayerNorm":
@@ -108,7 +112,6 @@ class TELinear(te.pytorch.Linear):
             bias=bias,
             return_bias=self.te_return_bias,
             **_get_extra_te_kwargs(config),
-            **kwargs,
         )
 
     def forward(self, x):
@@ -165,7 +168,6 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             parallel_mode="column",
             return_bias=self.te_return_bias,
             **_get_extra_te_kwargs(config),
-            **kwargs,
         )
 
     def forward(self, x):
@@ -218,10 +220,12 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
     Wrapper for the Transformer-Engine's `DotProductAttention` layer that also
     has "flash attention" enabled.
 
-    Note that if Megatron's parallel_state has not been initialized
-    yet, the tp_group passed to TE will be None and must be set later
-    via set_tensor_parallel_group().
+    Note that if Megatron's parallel_state has not been initialized yet, the
+    tp_group and cp_group passed to TE will be None and must be set later
+    via set_tensor_parallel_group() and set_context_parallel_group().
     """
+
+    cp_stream: torch.cuda.Stream = None
 
     def __init__(
         self,
@@ -231,6 +235,20 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
         **kwargs
     ):
         self.config = config
+
+        # Only Transformer-Engine version > 0.13.0 supports context parallelism
+        te_version = packaging.version.Version(version("transformer-engine"))
+        if te_version > packaging.version.Version("0.13.0"):
+            if getattr(TEDotProductAttention, "cp_stream") is None:
+                TEDotProductAttention.cp_stream = torch.cuda.Stream()
+            kwargs["cp_group"] = get_context_parallel_group(check_initialized=False)
+            kwargs["cp_global_ranks"] = get_context_parallel_global_ranks(check_initialized=False)
+            kwargs["cp_stream"] = TEDotProductAttention.cp_stream
+        else:
+            assert (
+                self.config.context_parallel_size == 1
+            ), "Only Transformer-Engine version > 0.13.0 supports context parallelism"
+
         super().__init__(
             num_attention_heads=self.config.num_attention_heads,
             kv_channels=self.config.kv_channels,
@@ -243,3 +261,42 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
             tp_group=get_tensor_model_parallel_group(check_initialized=False),
             **kwargs,
         )
+
+
+class TELayerNormMLP(te.pytorch.LayerNormMLP):
+    """
+    Wrapper for the Transformer-Engine's `LayerNormMLP` layer that combines
+    `LayerNorm` and the MLP (2 x feedforward layers) into a single module which
+    is performance-efficient as it removes the unnecessary FP8 -> FP32 casts.
+    """
+
+    def __init__(self, config: TransformerConfig, **kwargs):
+        self.config = config
+
+        # Only Transformer-Engine version >= 0.11.0 supports `RMSNorm`
+        te_version = packaging.version.Version(version("transformer-engine"))
+        if te_version >= packaging.version.Version("0.11.0"):
+            kwargs["normalization"] = self.config.normalization
+
+        super().__init__(
+            self.config.hidden_size,
+            self.config.ffn_hidden_size,
+            self.config.layernorm_epsilon,
+            fuse_wgrad_accumulation=self.config.gradient_accumulation_fusion,
+            tp_group=get_tensor_model_parallel_group(check_initialized=False),
+            tp_size=self.config.tensor_model_parallel_size,
+            get_rng_state_tracker=get_cuda_rng_tracker,
+            init_method=self.config.init_method,
+            params_dtype=self.config.params_dtype,
+            return_bias=not self.config.add_bias_linear,
+        )
+
+    def forward(self, x):
+        out = super().forward(x)
+
+        # TE only returns a tuple when return_bias is True, otherwise
+        # it returns a single Tensor, we always want to return two
+        # values regardless of the arguments.
+        if isinstance(out, (list, tuple)):
+            return out
+        return out, None

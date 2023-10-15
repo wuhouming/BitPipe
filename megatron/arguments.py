@@ -39,6 +39,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = _add_inference_args(parser)
     parser = _add_transformer_engine_args(parser)
     parser = _add_retro_args(parser)
+    parser = _add_experimental_args(parser)
 
     # Custom arguments.
     if extra_args_provider is not None:
@@ -143,11 +144,12 @@ def validate_args(args, defaults={}):
         assert args.pipeline_model_parallel_size > 2, \
             'pipeline-model-parallel size should be greater than 2 with ' \
             'interleaved schedule'
-        assert args.num_layers % args.num_layers_per_virtual_pipeline_stage == 0, \
-            'number of layers is not divisible by number of layers per virtual ' \
-            'pipeline stage'
-        args.virtual_pipeline_model_parallel_size = \
-            (args.num_layers // args.transformer_pipeline_model_parallel_size) // \
+        assert args.num_layers % args.transformer_pipeline_model_parallel_size == 0, \
+            'number of layers should be divisible by the pipeline parallel size'
+        num_layers_per_pipeline_stage = args.num_layers // args.transformer_pipeline_model_parallel_size
+        assert num_layers_per_pipeline_stage % args.num_layers_per_virtual_pipeline_stage == 0, \
+            'number of layers per pipeline stage must be divisible number of layers per virtual pipeline stage'
+        args.virtual_pipeline_model_parallel_size = num_layers_per_pipeline_stage // \
             args.num_layers_per_virtual_pipeline_stage
     else:
         args.virtual_pipeline_model_parallel_size = None
@@ -172,9 +174,9 @@ def validate_args(args, defaults={}):
         print('using {} for parameters ...'.format(args.params_dtype),
               flush=True)
 
-    # Overlapping grad reduce only supported without pipeline parallelism right now.
+    # Overlapping grad reduce not supported with interleaved PP right now.
     if args.overlap_grad_reduce:
-        assert args.pipeline_model_parallel_size == 1
+        assert args.virtual_pipeline_model_parallel_size is None
 
     if args.dataloader_type is None:
         args.dataloader_type = 'single'
@@ -369,6 +371,19 @@ def validate_args(args, defaults={}):
     # don't allow it to keep things simple
     if not args.add_position_embedding and args.position_embedding_type != 'rope':
         raise RuntimeError('--no-position-embedding is deprecated, use --position-embedding-type')
+    
+    # MoE Spec check
+    if args.num_experts is not None:
+        assert args.model_spec is None, "Model Spec must be None when using MoEs"
+
+    # Expert parallelism check
+    if args.expert_model_parallel_size  > 1:
+        assert args.num_experts is not None, "num_experts must be non None to use expert model parallelism"
+        assert args.num_experts % args.expert_model_parallel_size == 0, \
+            "Number of experts should be a multiple of expert model parallel_size."
+        if args.tensor_model_parallel_size > 1:
+            assert args.sequence_parallel, \
+                "When using expert parallelism and tensor parallelism, sequence parallelism must be used."
 
     # Print arguments.
     _print_args("arguments", args)
@@ -410,6 +425,7 @@ def core_transformer_config_from_args(args):
     kw_args['deallocate_pipeline_outputs'] = True
     kw_args['pipeline_dtype'] = args.params_dtype
     kw_args['batch_p2p_comm'] = not args.overlap_p2p_comm
+    kw_args['num_moe_experts'] = args.num_experts
     if args.swiglu:
         kw_args['activation_func'] = F.silu
         kw_args['gated_linear_unit'] = True
@@ -597,8 +613,6 @@ def _add_network_size_args(parser):
                        help='Number of Experts in Switch Transformer (None means no Switch)')
     group.add_argument('--untie-embeddings-and-output-weights', action='store_true',
                        help='Untie embeddings and output weights.'),
-    group.add_argument('--embedding-weights-in-fp32', action='store_true',
-                       help='Cast word embedding weights to fp32 before embedding fwd.'),
     return parser
 
 
@@ -696,7 +710,6 @@ def _add_regularization_args(parser):
                        'numerical stability')
     group.add_argument('--sgd-momentum', type=float, default=0.9,
                        help='Momentum factor for sgd')
-
     return parser
 
 
@@ -841,6 +854,12 @@ def _add_training_args(parser):
                        help='Disable fusing gradient accumulation to weight '
                        'gradient computation of linear layers',
                        dest='gradient_accumulation_fusion')
+    group.add_argument('--use-mcore-models', action='store_true',
+                       help='Use the implementation from megatron core',
+                       dest='use_mcore_models')                       
+    group.add_argument('--expert-parallel', action='store_true',
+                       help='Enable expert parallel optimization.')
+
     return parser
 
 
@@ -1012,8 +1031,11 @@ def _add_distributed_args(parser):
                        help='Timeout minutes for torch.distributed.')
     group.add_argument('--overlap-grad-reduce', action='store_true',
                        default=False, help='If set, overlap DDP grad reduce.')
+    group.add_argument('--no-delay-grad-reduce', action='store_false',
+                       help='If not set, delay grad reduction in all but first PP stage.',
+                       dest='delay_grad_reduce')
     group.add_argument('--no-scatter-gather-tensors-in-pipeline', action='store_false',
-                       help='Use scatter/gather to optimize communication of tensors in pipeline',
+                       help='If not set, use scatter/gather to optimize communication of tensors in pipeline.',
                        dest='scatter_gather_tensors_in_pipeline')
     group.add_argument('--use-ring-exchange-p2p', action='store_true',
                        default=False, help='If set, use custom-built ring exchange '
@@ -1042,10 +1064,11 @@ def _add_distributed_args(parser):
                        'affects the encoder embedding.)')
     group.add_argument('--use-distributed-optimizer', action='store_true',
                        help='Use distributed optimizer.')
-    
     # add terapipe argument
     group.add_argument('--use-terapipe', action='store_true',
                        help='Use terapipe.')
+    group.add_argument('--expert-model-parallel-size', type=int, default=1,
+                       help='Degree of expert model parallelism.')
     return parser
 
 
@@ -1287,4 +1310,16 @@ def _add_vision_args(parser):
     group.add_argument('--dino-warmup-teacher-temp-epochs', type=int, default=30,
                        help='warmup teacher temperaure epochs')
 
+    return parser
+
+def _add_experimental_args(parser):
+    group = parser.add_argument_group(title='experimental')
+
+    group.add_argument('--model-spec',
+                       type=str, default=None, nargs=2,
+                       help='Specify the <module_location function_name> pair '
+                            'that returns a spec to customize the transformer '
+                            'layer implementation. For more details, check the'
+                            '`transformer_layer.py` file that details the use '
+                            'of spec based customization.')
     return parser
