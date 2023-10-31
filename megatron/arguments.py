@@ -1108,6 +1108,9 @@ def _add_distributed_args(parser):
                        'affects the encoder embedding.)')
     group.add_argument('--use-distributed-optimizer', action='store_true',
                        help='Use distributed optimizer.')
+    # add terapipe argument
+    group.add_argument('--use-terapipe', action='store_true',
+                       help='Use terapipe.')
     group.add_argument('--expert-model-parallel-size', type=int, default=1,
                        help='Degree of expert model parallelism.')
     group.add_argument('--context-parallel-size', type=int, default=1,
