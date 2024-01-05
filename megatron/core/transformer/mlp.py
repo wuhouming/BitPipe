@@ -10,6 +10,10 @@ from megatron.core import parallel_state
 from megatron.core.dist_checkpointing import ShardedTensor
 from megatron.core.dist_checkpointing.mapping import ShardedTensorFactory
 from megatron.core.fusions.fused_bias_gelu import bias_gelu_impl
+from megatron.core.transformer.custom_layers.transformer_engine import (
+    TELayerNormColumnParallelLinear,
+    TELinear,
+)
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -87,10 +91,15 @@ class MLP(MegatronModule):
             tp_comm_buffer_name='fc2',
         )
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, is_first_microbatch=None):
 
         # [s, b, 4 * h/p]
-        intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
+        if isinstance(self.linear_fc1, TELayerNormColumnParallelLinear):
+            intermediate_parallel, bias_parallel = self.linear_fc1(
+                hidden_states, is_first_microbatch
+            )
+        else:
+            intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
 
         if self.config.bias_gelu_fusion:
             assert self.config.add_bias_linear is True
@@ -102,7 +111,10 @@ class MLP(MegatronModule):
             intermediate_parallel = self.activation_func(intermediate_parallel)
 
         # [s, b, h]
-        output, output_bias = self.linear_fc2(intermediate_parallel)
+        if isinstance(self.linear_fc2, TELinear):
+            output, output_bias = self.linear_fc2(intermediate_parallel, is_first_microbatch)
+        else:
+            output, output_bias = self.linear_fc2(intermediate_parallel)
 
         return output, output_bias
 
