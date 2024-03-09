@@ -211,7 +211,7 @@ class _GPT2BPETokenizer(MegatronTokenizer):
 
     @property
     def vocab_size(self):
-        return len(self.tokenizer.encoder)
+        return len(self.tokenizer)
 
     @property
     def vocab(self):
