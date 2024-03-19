@@ -215,7 +215,7 @@ def read_metadata(tracker_filename):
             print('WARNING: on rank {} found iteration {} in the '
                   'metadata while max iteration across the ranks '
                   'is {}, replacing it with max iteration.'.format(
-                      rank, iteration, max_iter), flush=True)
+                      torch.distributed.get_rank(), iteration, max_iter), flush=True)
     else:
         # When loading a checkpoint outside of training (for example,
         # when editing it), we might not have torch distributed
@@ -486,7 +486,7 @@ def _load_base_checkpoint(load_dir, rank0=False, sharded_state_dict=None):
         from megatron.fp16_deprecated import loss_scaler
         # For backward compatibility.
         if not rank0:
-            print_rank_0(' > deserializing using the old code structure ...')
+            print_with_rank(' > deserializing using the old code structure ...')
         sys.modules['fp16.loss_scaler'] = sys.modules[
             'megatron.fp16_deprecated.loss_scaler']
         sys.modules['megatron.fp16.loss_scaler'] = sys.modules[
@@ -495,8 +495,8 @@ def _load_base_checkpoint(load_dir, rank0=False, sharded_state_dict=None):
         sys.modules.pop('fp16.loss_scaler', None)
         sys.modules.pop('megatron.fp16.loss_scaler', None)
     except BaseException as e:
-        print_rank_0('could not load the checkpoint')
-        print_rank_0(e)
+        print_with_rank('could not load the checkpoint')
+        print_with_rank(e)
         sys.exit()
 
     return state_dict, checkpoint_name, release
