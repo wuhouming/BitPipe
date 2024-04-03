@@ -13,7 +13,7 @@ from apex.optimizers import FusedAdam as Adam
 from .. import parallel_state, tensor_parallel
 from ..dist_checkpointing import ShardedTensor
 from ..dist_checkpointing.mapping import LocalNonpersitentObject, ShardedObject, ShardedStateDict
-from ..distributed import ParamAndGradBuffer, shard_buffer
+from ..distributed import ParamAndGradBuffer, shard_buffer, all_gather_into_tensor
 from .grad_scaler import MegatronGradScaler
 from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper
 from .optimizer_config import OptimizerConfig
@@ -1187,7 +1187,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         ranks.
 
         Additionally, return references to the entire buffers, for use
-        in _all_gather_base.
+        in all_gather_into_tensor.
         """
 
         # Buffer views.
@@ -1235,7 +1235,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 all_gather_handle_index
             ]
             assert all_gather_handle_index < len(self.all_gather_handles)
-            all_gather_handle = torch.distributed._all_gather_base(
+            all_gather_handle = all_gather_into_tensor(
                 pbuf, pbuf_views[data_parallel_rank], group=data_parallel_group, async_op=async_op,
             )
             self.all_gather_handles[all_gather_handle_index] = all_gather_handle

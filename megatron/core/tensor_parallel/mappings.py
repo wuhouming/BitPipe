@@ -11,6 +11,7 @@ from megatron.core.parallel_state import (
 )
 
 from .utils import split_tensor_along_last_dim
+from ..distributed import all_gather_into_tensor, reduce_scatter_tensor
 
 
 def _reduce(input_):
@@ -116,7 +117,7 @@ def _gather_along_first_dim(input_):
     dim_size[0] = dim_size[0] * world_size
 
     output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
-    torch.distributed._all_gather_base(
+    all_gather_into_tensor(
         output, input_.contiguous(), group=get_tensor_model_parallel_group()
     )
 
@@ -138,7 +139,7 @@ def _reduce_scatter_along_first_dim(input_):
     dim_size[0] = dim_size[0] // world_size
 
     output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
-    torch.distributed._reduce_scatter_base(
+    reduce_scatter_tensor(
         output, input_.contiguous(), group=get_tensor_model_parallel_group()
     )
     return output
@@ -156,7 +157,7 @@ def _gather_along_first_dim_moe(input_):
     dim_size[0] = dim_size[0] * world_size
 
     output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
-    torch.distributed._all_gather_base(output, input_.contiguous(), group=group)
+    all_gather_into_tensor(output, input_.contiguous(), group=group)
 
     return output
 
@@ -174,7 +175,7 @@ def _reduce_scatter_along_first_dim_moe(input_):
     dim_size[0] = dim_size[0] // world_size
 
     output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
-    torch.distributed._reduce_scatter_base(output, input_.contiguous(), group=group)
+    reduce_scatter_tensor(output, input_.contiguous(), group=group)
     return output
 
 
