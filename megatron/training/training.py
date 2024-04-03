@@ -211,9 +211,6 @@ def pretrain(train_valid_test_dataset_provider,
         time.time() - _TRAIN_START_TIME))
     print_datetime('after megatron is initialized')
 
-    args = get_args()
-    timers = get_timers()
-
     one_logger = get_one_logger()
     if one_logger:
         one_logger.log_metrics({
