@@ -24,6 +24,12 @@ class TransformerConfig(ModelParallelConfig):
     num_layers: int = 0
     """Number of transformer layers in a transformer block."""
 
+    first_pipeline_num_layers: int = 0
+    """Used when you want to split pipeline parallel unevenly. 0 means even partition."""
+
+    independent_parallel: bool = False
+    """Set to True if you want to disable pipeline parallel for the model."""
+
     hidden_size: int = 0
     """Transformer hidden size."""
 
@@ -432,13 +438,16 @@ class TransformerConfig(ModelParallelConfig):
                 self.init_method_std, self.num_layers
             )
 
-        if self.moe_extended_tp:
-            if self.moe_token_dispatcher_type != 'allgather':
-                raise ValueError(
-                    "Moe extended TP parallelism only applies to allgather based token dispatcher."
-                )
-            extended_tp_size = self.tensor_model_parallel_size * self.expert_model_parallel_size
-            if self.ffn_hidden_size % extended_tp_size != 0:
-                raise ValueError(
-                    f'ffn_hidden_size: {self.ffn_hidden_size} must be divisible by extended_tp_size {extended_tp_size}'
-                )
+@dataclass
+class VisionTransformerConfig(TransformerConfig):
+    """Configuration object for megatron-core vision transformers.
+
+    The initialization function has an argument for each parameter, including those in ModelParallelConfig.
+    """
+
+    ####################
+    # model architecture
+    ####################
+    img_w: int = 224
+    img_h: int = 224
+    patch_dim: int = 14

@@ -28,79 +28,14 @@ class MCoreSetter(ModelSetter):
         model,
         word=None,
         pos=None,
+        conv_weight=None,
+        conv_bias=None,
     ):
         cls.set_tensor(model.embedding.word_embeddings.weight, word)
         if pos is not None:
             cls.set_tensor(model.embedding.position_embeddings.weight, pos)
-
-    @classmethod
-    def set_final_norm(
-        cls,
-        model,
-        weight=None,
-        bias=None,
-    ):
-        block = cls.get_transformer_block(model)
-        cls.set_tensor(block.final_layernorm.weight, weight)
-        if bias is not None:
-            cls.set_tensor(block.final_layernorm.bias, bias)
-
-    @classmethod
-    def set_output_word_embeddings(
-        cls,
-        model,
-        emb=None,
-    ):
-        cls.set_tensor(model.embedding.word_embeddings.weight, emb)
-
-    @classmethod
-    def set_output_layer(
-        cls,
-        model,
-        weight=None,
-    ):
-        cls.set_tensor(model.output_layer.weight, weight)
-
-    @classmethod
-    def set_pooler(
-        cls,
-        model,
-        weight=None,
-        bias=None,
-    ):
-        cls.set_tensor(model.pooler.dense.weight, weight)
-        if bias is not None:
-            cls.set_tensor(model.pooler.dense.bias, bias)
-
-    @classmethod
-    def set_lm_head(
-        cls,
-        model,
-        dense_weight=None,
-        dense_bias=None,
-        norm_weight=None,
-        norm_bias=None,
-    ):
-
-        cls.set_tensor(model.lm_head.dense.weight, dense_weight)
-        if dense_bias is not None:
-            cls.set_tensor(model.lm_head.dense.bias, dense_bias)
-
-        cls.set_tensor(model.lm_head.layer_norm.weight, norm_weight)
-        if norm_bias is not None:
-            cls.set_tensor(model.lm_head.layer_norm.bias, norm_bias)
-
-    @classmethod
-    def set_binary_head(
-        cls,
-        model,
-        weight=None,
-        bias=None,
-    ):
-        cls.set_tensor(model.binary_head.weight, weight)
-        if bias is not None:
-            cls.set_tensor(model.binary_head.bias, bias)
-
+        cls.set_tensor(model.conv1.weight, conv_weight)
+        cls.set_tensor(model.conv1.bias, conv_bias)
 
 class MCoreLocalSetter(MCoreSetter):
 
@@ -178,9 +113,9 @@ class MCoreTESetter(MCoreSetter):
         l = block.layers[layer_idx]
 
         # Self attention.
-        cls.set_tensor(l.self_attention.linear_qkv.layer_norm_weight, self_attn_norm_weight)
+        cls.set_tensor(l.input_layernorm.weight, self_attn_norm_weight)
         if self_attn_norm_bias is not None:
-            cls.set_tensor(l.self_attention.linear_qkv.layer_norm_bias, self_attn_norm_bias)
+            cls.set_tensor(l.input_layernorm.bias, self_attn_norm_bias)
 
         cls.set_tensor(l.self_attention.linear_qkv.weight, self_attn_qkv_weight)
         if self_attn_qkv_bias is not None:
@@ -191,9 +126,9 @@ class MCoreTESetter(MCoreSetter):
             cls.set_tensor(l.self_attention.linear_proj.bias, self_attn_proj_bias)
 
         # MLP.
-        cls.set_tensor(l.mlp.linear_fc1.layer_norm_weight, mlp_norm_weight)
+        cls.set_tensor(l.pre_mlp_layernorm.weight, mlp_norm_weight)
         if mlp_norm_bias is not None:
-            cls.set_tensor(l.mlp.linear_fc1.layer_norm_bias, mlp_norm_bias)
+            cls.set_tensor(l.pre_mlp_layernorm.bias, mlp_norm_bias)
 
         cls.set_tensor(l.mlp.linear_fc1.weight, mlp_fc1_weight)
         if mlp_fc1_bias is not None:
@@ -225,8 +160,6 @@ def add_arguments(parser):
     group.add_argument('--target-pipeline-parallel-size', type=int,
                        help='Target tensor model parallel size, default to the pipeline parall size '
                        'in the input checkpoint if provided by the loader, otherwise to 1')
-    group.add_argument('--first-pipeline-num-layers', type=int, default=0,
-                       help='Used when you want to split pipeline parallel unevenly. 0 means even partition.')
     group.add_argument('--saver-transformer-impl', default='transformer_engine',
                        choices=['local', 'transformer_engine'],
                        help='Which Transformer implementation to use.')
@@ -319,7 +252,6 @@ def save_checkpoint(queue, args):
                 '--tokenizer-type', str(md.tokenizer_type),
                 '--tensor-model-parallel-size', str(args.target_tensor_parallel_size),
                 '--pipeline-model-parallel-size', str(args.target_pipeline_parallel_size),
-                '--first-pipeline-num-layers', str(args.first_pipeline_num_layers),
                 '--no-masked-softmax-fusion',
                 '--no-bias-gelu-fusion',
                 '--no-bias-dropout-fusion',
@@ -355,7 +287,7 @@ def save_checkpoint(queue, args):
     if hasattr (md, 'checkpoint_args'):
         # These are arguments that we are either changing, or cause problems for validation if they are set
         # Note that some of these deal with T5 so will need to be changed if we support T5.
-        args_to_keep = ['tensor_model_parallel_size', 'pipeline_model_parallel_size', 'first_pipeline_num_layers', 'world_size', 'params_dtype',
+        args_to_keep = ['tensor_model_parallel_size', 'pipeline_model_parallel_size', 'world_size', 'params_dtype',
                         'num_layers_per_virtual_pipeline_stage', 'virtual_pipeline_model_parallel_size',
                         'masked_softmax_fusion', 'bias_gelu_fusion', 'bias_dropout_fusion',
                         'sequence_parallel', 'async_tensor_model_parallel_allreduce',
@@ -415,6 +347,26 @@ def save_checkpoint(queue, args):
     elif md.model_type == 'BERT':
         from pretrain_bert import model_provider
         margs.model_type = ModelType.encoder_or_decoder
+    elif md.model_type == 'EVA':
+        from megatron.training.arguments import core_transformer_config_from_args
+        from megatron.core.models.vision.eva_clip_model import Eva2ClipModel
+        from megatron.core.transformer.transformer_config import VisionTransformerConfig
+        from megatron.core.models.vision.vit_layer_specs import (
+            get_vit_layer_with_transformer_engine_spec_for_eva_clip,
+        )
+        def model_provider(pre_process=True):
+            args = get_args()
+            print('building EVA model ...')
+            config = core_transformer_config_from_args(args, VisionTransformerConfig)
+            transformer_layer_spec = get_vit_layer_with_transformer_engine_spec_for_eva_clip()
+            model = Eva2ClipModel(
+                config=config,
+                transformer_layer_spec=transformer_layer_spec,
+                vocab_size=args.vocab_size,
+                pre_process=pre_process,
+            )
+            return model
+        margs.model_type = ModelType.encoder_or_decoder
     else:
         raise Exception(f'unrecognized model type: {args.model_type}')
 
@@ -433,53 +385,24 @@ def save_checkpoint(queue, args):
     if md.position_embedding_type == 'learned_absolute':
         pos_embed = embeddings_msg.pop("position embeddings")
     orig_word_embed = embeddings_msg.pop("word embeddings")
+    conv_weight = embeddings_msg.pop("conv weight")
+    conv_bias = embeddings_msg.pop("conv bias")
     check_message(embeddings_msg)
-
-    # Deal with padding
-    if md.true_vocab_size is not None:
-        # figure out what our padded vocab size is
-        orig_vocab_size = orig_word_embed.shape[0]
-        margs.padded_vocab_size = _vocab_size_with_padding(md.true_vocab_size, margs)
-
-        # Cut out extra padding we don't need
-        if orig_vocab_size > margs.padded_vocab_size:
-            full_word_embed = orig_word_embed[0:margs.padded_vocab_size,:]
-
-        # Expanding embedding to larger size by replicating final entry
-        elif orig_vocab_size < margs.padded_vocab_size:
-            padding_size = margs.padded_vocab_size - orig_vocab_size
-
-            full_word_embed = torch.cat((
-                orig_word_embed,
-                orig_word_embed[-1].unsqueeze(0).expand(padding_size, -1)))
-
-        # Same size!
-        else:
-            full_word_embed = orig_word_embed
-    else:
-        print("Original vocab size not specified, leaving embedding table as-is. "
-              "If you've changed the tensor parallel size this could cause problems.")
-        margs.padded_vocab_size = orig_word_embed.shape[0]
-        full_word_embed = orig_word_embed
-
-    # Split into new tensor model parallel sizes
-    out_word_embed = torch.chunk(full_word_embed, args.target_tensor_parallel_size, dim=0)
 
     # Parameter setter class.
     setter = get_model_setter(md.model_type, margs.transformer_impl)
 
     # Get models.
-    def get_models(count, dtype, pre_process, post_process):
+    def get_models(count, dtype, pre_process):
         models = []
         for rank in range(count):
-            models.append(model_provider(pre_process, post_process).to(dtype))
+            models.append(model_provider(pre_process).to(dtype))
             print_memory_usage("saver", rank, count)
         return models
 
     # Make models for first pipeline stage and fill in embeddings
     mpu.set_pipeline_model_parallel_rank(0)
-    post_process = args.target_pipeline_parallel_size == 1
-    models = get_models(args.target_tensor_parallel_size, md.params_dtype, True, post_process)
+    models = get_models(args.target_tensor_parallel_size, md.params_dtype, True)
 
     # Set embeddings.
     # --------------
@@ -488,8 +411,10 @@ def save_checkpoint(queue, args):
             assert not setter.has_position_embeddings(model)
         setter.set_embeddings(
             model,
-            word=out_word_embed[tp_rank],
+            word=orig_word_embed,
             pos=pos_embed,
+            conv_weight=conv_weight,
+            conv_bias=conv_bias
         )
 
     # Transformer layers.
@@ -499,8 +424,7 @@ def save_checkpoint(queue, args):
         # For later pipeline parallel ranks, make the new models
         if pp_rank > 0:
             mpu.set_pipeline_model_parallel_rank(pp_rank)
-            post_process = pp_rank == args.target_pipeline_parallel_size - 1
-            models = get_models(args.target_tensor_parallel_size, md.params_dtype, False, post_process)
+            models = get_models(args.target_tensor_parallel_size, md.params_dtype, False)
 
         for layer in range(len(setter.get_transformer_block(models[0]).layers)):
             msg = queue_get(f"transformer layer {total_layer_num}")
@@ -566,99 +490,6 @@ def save_checkpoint(queue, args):
 
             total_layer_num = total_layer_num + 1
             check_message(msg)
-
-
-        if post_process:
-            msg = queue_get("final norm")
-            final_norm_weight = msg.pop("weight")
-            if md.norm_has_bias:
-                final_norm_bias = msg.pop("bias")
-            for tp_rank, model in enumerate(models):
-                setter.set_final_norm(
-                    model,
-                    weight=final_norm_weight,
-                    bias=final_norm_bias if md.norm_has_bias else None,
-                )
-                if pp_rank != 0 and not md.output_layer:
-                    # Copy word embeddings to final pipeline rank
-                    setter.set_output_word_embeddings(
-                        model,
-                        emb=out_word_embed[tp_rank],
-                    )
-            del final_norm_weight
-            if md.norm_has_bias:
-                del final_norm_bias
-            check_message(msg)
-
-            if md.output_layer:
-                msg = queue_get("output layer")
-                if not hasattr(models[0], 'output_layer'):
-                    print("ERROR: got an output layer, but model does not have one")
-                    exit(1)
-                output_layer_weight = torch.chunk(msg.pop("weight"), args.target_tensor_parallel_size, dim=0)
-                for tp_rank, model in enumerate(models):
-                    setter.set_output_layer(model, output_layer_weight[tp_rank])
-                del output_layer_weight
-                check_message(msg)
-
-            msg = queue_get()
-            if msg != "done" and msg["name"] == "pooler":
-                if not hasattr(models[0], 'pooler'):
-                    print("ERROR: got a pooler, but model does not have one")
-                    exit(1)
-                print("received pooler")
-                pooler_weight = msg.pop("weight")
-                pooler_bias = msg.pop("bias")
-                for tp_rank in range(args.target_tensor_parallel_size):
-                    setter.set_pooler(
-                        model=models[tp_rank],
-                        weight=pooler_weight,
-                        bias=pooler_bias,
-                    )
-                del pooler_weight
-                del pooler_bias
-                check_message(msg)
-                msg = queue_get()
-
-            if msg != "done" and msg["name"] == "lm head":
-                if not hasattr(models[0], 'lm_head'):
-                    print("ERROR: got an lm head, but model does not have one")
-                    exit(1)
-                print("received lm head")
-                lm_head_dense_weight = msg.pop("dense weight")
-                lm_head_dense_bias = msg.pop("dense bias")
-                lm_head_norm_weight = msg.pop("norm weight")
-                if md.norm_has_bias:
-                    lm_head_norm_bias = msg.pop("norm bias")
-                for tp_rank in range(args.target_tensor_parallel_size):
-                    setter.set_lm_head(
-                        model=models[tp_rank],
-                        dense_weight=lm_head_dense_weight,
-                        dense_bias=lm_head_dense_bias,
-                        norm_weight=lm_head_norm_weight,
-                        norm_bias=lm_head_norm_bias if md.norm_has_bias else None,
-                    )
-                check_message(msg)
-                msg = queue_get()
-
-            if msg != "done" and msg["name"] == "binary head":
-                if not hasattr(models[0], 'binary_head'):
-                    print("ERROR: got a binary head, but model does not have one")
-                    exit(1)
-                print("received binary head")
-                binary_head_weight = msg.pop("weight")
-                binary_head_bias = msg.pop("bias")
-                for tp_rank in range(args.target_tensor_parallel_size):
-                    setter.set_binary_head(
-                        model=models[tp_rank],
-                        weight=binary_head_weight,
-                        bias=binary_head_bias,
-                    )
-                check_message(msg)
-                msg = queue_get()
-
-            if msg != "done":
-                print("ERROR: got some more data but was expecting to be done")
 
         for tp_rank in range(args.target_tensor_parallel_size):
             mpu.set_tensor_model_parallel_rank(tp_rank)

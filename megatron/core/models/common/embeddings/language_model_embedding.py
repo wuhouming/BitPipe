@@ -8,6 +8,7 @@ from torch import Tensor
 from megatron.core import tensor_parallel
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core import mpu
 
 
 class LanguageModelEmbedding(MegatronModule):
@@ -30,6 +31,7 @@ class LanguageModelEmbedding(MegatronModule):
         max_sequence_length: int,
         position_embedding_type: Literal['learned_absolute', 'rope'] = 'learned_absolute',
         num_tokentypes: int = 0,
+        parallel_word_embedding: bool = True,
     ):
         super().__init__(config=config)
 
@@ -39,13 +41,19 @@ class LanguageModelEmbedding(MegatronModule):
         self.add_position_embedding: bool = position_embedding_type == 'learned_absolute'
         self.num_tokentypes = num_tokentypes
 
-        # Word embeddings (parallel).
-        self.word_embeddings = tensor_parallel.VocabParallelEmbedding(
-            num_embeddings=self.vocab_size,
-            embedding_dim=self.config.hidden_size,
-            init_method=self.config.init_method,
-            config=self.config,
-        )
+        # Word embeddings (parallel or not).
+        if parallel_word_embedding:
+            self.word_embeddings = tensor_parallel.VocabParallelEmbedding(
+                num_embeddings=self.vocab_size,
+                embedding_dim=self.config.hidden_size,
+                init_method=self.config.init_method,
+                config=self.config,
+            )
+        else:
+            self.word_embeddings = torch.nn.Embedding(
+                num_embeddings=vocab_size,
+                embedding_dim=self.config.hidden_size,
+            )
 
         # Position embedding (serial).
         if self.add_position_embedding:
@@ -80,7 +88,7 @@ class LanguageModelEmbedding(MegatronModule):
             self.tokentype_embeddings.weight.data.fill_(0)
             self.tokentype_embeddings.weight.shared = True
 
-    def forward(self, input_ids: Tensor, position_ids: Tensor, tokentype_ids: int = None) -> Tensor:
+    def forward(self, input_ids: Tensor, position_ids: Tensor, tokentype_ids: int = None, external_feature_dict: dict = {}) -> Tensor:
         """Forward pass of the embedding module.
 
         Args:
@@ -92,6 +100,26 @@ class LanguageModelEmbedding(MegatronModule):
             Tensor: The output embeddings
         """
         word_embeddings = self.word_embeddings(input_ids)
+        if external_feature_dict:
+            assert 'features' in external_feature_dict \
+                and (len(external_feature_dict) ==1 \
+                     or len(external_feature_dict) == 2 and 'pre_len' in external_feature_dict \
+                     or len(external_feature_dict) == 2 and 'indices' in external_feature_dict \
+                     or len(external_feature_dict) == 3 and 'src_indices' in external_feature_dict and 'tgt_indices' in external_feature_dict), "The format of external_feature_dict is not right!"
+            word_embeddings = word_embeddings.clone()
+            features = external_feature_dict['features']
+            if 'indices' in external_feature_dict:
+                indices_b, indices_s = external_feature_dict['indices'].unbind(dim=0)
+                word_embeddings[indices_b.view(-1), indices_s.view(-1)] = features.view(-1, features.shape[-1])
+            elif 'pre_len' in external_feature_dict:
+                pre_len = external_feature_dict['pre_len']
+                word_embeddings[:,pre_len:pre_len+features.shape[1]] = features
+            elif "src_indices" in external_feature_dict and "tgt_indices" in external_feature_dict:
+                src_indices_b, src_indices_s = external_feature_dict['src_indices']
+                tgt_indices_b, tgt_indices_s = external_feature_dict['tgt_indices']
+                word_embeddings[tgt_indices_b, tgt_indices_s] = features[src_indices_b, src_indices_s]
+            else:
+                word_embeddings += features.mean() * 0 # To avoid backward hanging.
         if self.add_position_embedding:
             position_embeddings = self.position_embeddings(position_ids)
             embeddings = word_embeddings + position_embeddings
@@ -115,6 +143,8 @@ class LanguageModelEmbedding(MegatronModule):
 
         # Dropout.
         if self.config.sequence_parallel:
+            if isinstance(self.word_embeddings, torch.nn.Embedding):
+                embeddings += self.word_embeddings.weight[0].mean() * 0
             embeddings = tensor_parallel.scatter_to_sequence_parallel_region(embeddings)
             # `scatter_to_sequence_parallel_region` returns a view, which prevents
             # the original tensor from being garbage collected. Clone to facilitate GC.
@@ -124,6 +154,9 @@ class LanguageModelEmbedding(MegatronModule):
             with tensor_parallel.get_cuda_rng_tracker().fork():
                 embeddings = self.embedding_dropout(embeddings)
         else:
+            if mpu.get_context_parallel_world_size() != 1:
+                if isinstance(self.word_embeddings, torch.nn.Embedding):
+                    embeddings += self.word_embeddings.weight[0].mean() * 0
             embeddings = self.embedding_dropout(embeddings)
 
         return embeddings
