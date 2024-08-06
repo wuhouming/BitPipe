@@ -1,9 +1,15 @@
 This repository is a fork of [Megatron-LM](https://github.com/NVIDIA/Megatron-LM). The original README can be found [here](https://github.com/NVIDIA/Megatron-LM?tab=readme-ov-file#readme).
 
-# BitPipe-Bidirectional Interleaved Pipeline Parallelism
+# BitPipe: Bidirectional Interleaved Pipeline Parallelism
 
 BitPipe is a bidirectional interleaved pipeline parallelism for accelerating large models training. Specifically, a hybrid scheme of fusing interleaved pipelines with bidirectional pipelines is proposed to reduce the computational time of each single micro-batch and multiply the number of simultaneous execution devices. A V-shaped schedule with eager
 gradient synchronization is introduced to reduce and overlap the communication between devices. 
+
+The key idea of BitPipe is to seamlessly merge two V-shaped interleaved pipelines in opposite directions.
+![image](https://github.com/wuhouming/BitPipe/blob/main/docs/BitPipe_images/BitPipe-v.svg)
+
+Scale to more micro-batches within a training iteration.
+![image](https://github.com/wuhouming/BitPipe/blob/main/docs/BitPipe_images/scale-moreb.svg)
 
 # Usage
 Quick settings to enable BitPipe:
