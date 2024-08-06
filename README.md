@@ -6,9 +6,11 @@ BitPipe is a bidirectional interleaved pipeline parallelism for accelerating lar
 gradient synchronization is introduced to reduce and overlap the communication between devices. 
 
 The key idea of BitPipe is to seamlessly merge two V-shaped interleaved pipelines in opposite directions.
+
 ![image](https://github.com/wuhouming/BitPipe/blob/main/docs/BitPipe_images/BitPipe-v.svg)
 
 Scale to more micro-batches within a training iteration.
+
 ![image](https://github.com/wuhouming/BitPipe/blob/main/docs/BitPipe_images/scale-moreb.svg)
 
 # Usage
