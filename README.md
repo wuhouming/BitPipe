@@ -161,4 +161,19 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
 
 -->
 
+## Activations recompute-enhanced
+<pre>
 
+# The default and recommended 
+SELECTIVE_RECOMPUTE_ARGS="
+    --recompute-granularity selective
+"
+
+# For cases where memory is very tight
+FULL_RECOMPUTE_ARGS="
+    --recompute-granularity full \
+    --recompute-method uniform \
+    --recompute-num-layers 1
+"
+
+</pre>
